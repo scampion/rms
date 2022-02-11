@@ -37,29 +37,32 @@ async def homepage(request):
 
 
 async def uploadfiles(request):
+    session_key = get_random_bytes(16)
     form = await request.form()
     assert form['email'].split('@')[1] in email_domains, "You email domain is not allowed"
     oid = uuid.uuid1()
-    session_key = get_random_bytes(16)
-    for f in form.getlist("files"):
+    r.hmset(f"orders:{oid}", {"task": form["task"],
+                              "aeskey": base64.b64encode(session_key),
+                              "time": time.time(),
+                              "email": form['email']}
+            )
+    r.expire(f"orders:{oid}", ttl)
+    r.lpush("tobeconfirmed", str(oid))
+    r.publish('tobeconfirmed', str(oid))
+    files = form.getlist("files")
+    await register_files(files, oid, session_key)
+    return JSONResponse({'status': 'registered', 'oid': str(oid)})
+
+
+async def register_files(files, oid, session_key):
+    for f in files:
         contents = await f.read()
         sha1 = hashlib.sha1(contents).hexdigest()
         filepath = os.path.join(storage, sha1)
         await write_enc_file(contents, filepath, session_key)
-        r.hset(f"file:{sha1}", "filename", f.filename)
-        r.hset(f"file:{sha1}", "content_type", f.content_type)
-        r.lpush(f"files:{oid}", sha1)
-        r.expire(f"files:{oid}", ttl)
-    r.hmset(f"params:{oid}", {"task": form["task"]})
-    r.hmset(f"params:{oid}", {"aeskey": base64.b64encode(session_key)})
-    r.hmset(f"params:{oid}", {"time": time.time()})
-    r.lpush("tobeconfirmed", str(oid))
-    r.publish('todo', str(oid))
-    return JSONResponse({'status': 'registered',
-                         'oid': str(oid),
-                         "files": list(ls_sha1),
-                         "getlinks": [f"http://localhost:8000/get/{oid}/" + s for s in ls_sha1]
-                         })
+        r.hset(f"files:{sha1}", "filename", f.filename)
+        r.hset(f"files:{sha1}", "content_type", f.content_type)
+        r.lpush(f"orders:files:{oid}", sha1)
 
 
 async def write_enc_file(contents, filepath, session_key):
@@ -102,14 +105,11 @@ async def get(request):
         return Response(content=data, media_type=str(r.hget(f"file:{sha1}", "content_type")))
 
 
-async def job(request):
-    if request.client.host.encode('utf8') not in r.smembers("allowed_ips"):
-        return JSONResponse({"error": "ip not authorized"}, status_code=403)
-    else:
-        return JSONResponse({'IP': request.client.host})
-    runner = request.path_params['runner_name']
-    images = request.path_params['images']
-    gpus = request.path_params['gpus_in_gb']
+async def fetch(request):
+    assert request.client.host.encode('utf8') in r.smembers("ips_allowed"), "ip not authorized"
+    assert request.path_params['token'].encode('utf8') in r.smembers("runners"), "runner not authorized"
+    print(request.path_params['images'])
+    return JSONResponse({'status': 'todo'})
 
 
 ########################################################################################################################
@@ -128,12 +128,20 @@ if config_file:
     ttl = config.get('ttl', ttl)
     email_domains = config.get('email_domains', email_domains)
     storage = config.get('storage', storage)
+    for runner, params in config.get('runners', {}).items():
+        r.sadd("runners", runner)
+        r.hmset("runners:"+runner, params)
+        for k, v in params.items():
+            if k == 'ip':
+                r.sadd('ips_allowed', v)
+            if k == 'host':
+                r.sadd('hosts_allowed', v)
 
 app = Starlette(debug=True, routes=[
     Route('/', endpoint=homepage),
     Route('/uploadfiles', endpoint=uploadfiles, methods=['POST']),
     Route("/status/{oid}", endpoint=status),
-    Route("/get/{oid}/{sha1}", endpoint=get), #to delete
+    Route("/get/{oid}/{sha1}", endpoint=get),  # to delete
     Route("/file/{sha1}", endpoint=file),  # to delete
-    Route('/job', endpoint=job, methods=['GET', 'POST']),
+    Route('/fetch/{token}', endpoint=fetch, methods=['GET', 'POST']),
 ])
