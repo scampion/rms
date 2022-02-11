@@ -1,0 +1,6 @@
+python-multipart
+redis
+uvicorn
+starlette
+pycryptodome
+
