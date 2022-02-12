@@ -3,4 +3,5 @@ redis
 uvicorn
 starlette
 pycryptodome
+pyjwt
 

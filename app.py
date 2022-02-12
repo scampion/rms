@@ -11,9 +11,8 @@ import time
 import uuid
 import logging
 
+import jwt
 import redis
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
 from starlette.responses import JSONResponse, HTMLResponse, Response
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -24,43 +23,33 @@ async def homepage(request):
 
 async def uploadfiles(request):
     try:
-        session_key = get_random_bytes(16)
         form = await request.form()
         assert form['email'].split('@')[1] in email_domains, f"{form['email']} email domain is not allowed"
         oid = uuid.uuid1()
         r.hmset(f"orders:{oid}", {"image": form["image"],
-                                  "aeskey": base64.b64encode(session_key),
                                   "time": time.time(),
                                   "email": form['email'],
                                   "status": "tobeconfirmed"})
         r.expire(f"orders:{oid}", ttl)
         r.publish('order', str(oid))
         files = form.getlist("files")
-        await register_files(files, form["image"], oid, session_key)
+        await register_files(files, form["image"], oid)
         return JSONResponse({'status': 'registered', 'oid': str(oid)})
     except Exception as e:
         return await error_handler(e)
 
 
-async def register_files(files, image, oid, session_key):
+async def register_files(files, image, oid):
     for f in files:
         contents = await f.read()
         sha1 = hashlib.sha1(contents).hexdigest()
         filepath = os.path.join(storage, sha1)
-        await write_enc_file(contents, filepath, session_key)
+        with open(filepath, 'wb') as outfile:
+            outfile.write(contents)
         r.hset(f"files:{sha1}", "filename", f.filename)
         r.hset(f"files:{sha1}", "content_type", f.content_type)
         r.lpush(f"orders:files:{oid}", sha1)
         r.lpush(f"jobs:{image}", sha1)
-
-
-async def write_enc_file(contents, filepath, session_key):
-    with open(filepath, 'wb') as outfile:
-        cipher_aes = AES.new(session_key, AES.MODE_EAX)
-        ciphertext, tag = cipher_aes.encrypt_and_digest(contents)
-        outfile.write(cipher_aes.nonce)
-        outfile.write(tag)
-        outfile.write(ciphertext)
 
 
 async def status(request):
@@ -76,9 +65,13 @@ async def fetch(request):
     try:
         ip = request.client.host.encode('utf8')
         assert ip in r.smembers("ips_allowed"), f"ip {ip} not authorized"
+        runner = request.path_params.get('runner', '')
+        assert runner.encode('utf8') in r.smembers("runners"), f"runner {runner} unknown"
         assert 'Authorization' in request.headers, "Authorization needed"
         auth_token = request.headers['Authorization'].replace('Bearer ','').encode('utf8')
-        assert auth_token in r.smembers("runners"), f"runner {auth_token} not authorized"
+        key = r.hget(f"runners:{runner}", "key").decode('utf8')
+        data = jwt.decode(auth_token, key, algorithms="HS256")
+        assert data.get("name") == runner, "Name not decoded"
         data = await request.json()
         for i in data.get("images", []):
             sha1 = r.lpop("jobs:"+i)
@@ -133,5 +126,5 @@ app = Starlette(debug=True, routes=[
     Route('/', endpoint=homepage),
     Route('/uploadfiles', endpoint=uploadfiles, methods=['POST']),
     Route("/status/{oid}", endpoint=status),
-    Route('/fetch', endpoint=fetch, methods=['GET', 'POST']),
+    Route('/fetch/{runner}', endpoint=fetch, methods=['GET', 'POST']),
 ])

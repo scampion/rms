@@ -1,3 +1,10 @@
 {
-  "email_domains":["example.com", "test.com"]
+  "email_domains":["example.com", "test.com"],
+  "runners": {
+    "localhost":
+    {
+      "key": "mysecret",
+      "ip": "127.0.0.1"
+    }
+  }
 }
