@@ -28,21 +28,21 @@ async def uploadfiles(request):
         form = await request.form()
         assert form['email'].split('@')[1] in email_domains, f"{form['email']} email domain is not allowed"
         oid = uuid.uuid1()
-        r.hmset(f"orders:{oid}", {"task": form["task"],
+        r.hmset(f"orders:{oid}", {"image": form["image"],
                                   "aeskey": base64.b64encode(session_key),
                                   "time": time.time(),
-                                  "email": form['email']})
+                                  "email": form['email'],
+                                  "status": "tobeconfirmed"})
         r.expire(f"orders:{oid}", ttl)
-        r.lpush("tobeconfirmed", str(oid))
-        r.publish('tobeconfirmed', str(oid))
+        r.publish('order', str(oid))
         files = form.getlist("files")
-        await register_files(files, oid, session_key)
+        await register_files(files, form["image"], oid, session_key)
         return JSONResponse({'status': 'registered', 'oid': str(oid)})
     except Exception as e:
         return await error_handler(e)
 
 
-async def register_files(files, oid, session_key):
+async def register_files(files, image, oid, session_key):
     for f in files:
         contents = await f.read()
         sha1 = hashlib.sha1(contents).hexdigest()
@@ -51,6 +51,7 @@ async def register_files(files, oid, session_key):
         r.hset(f"files:{sha1}", "filename", f.filename)
         r.hset(f"files:{sha1}", "content_type", f.content_type)
         r.lpush(f"orders:files:{oid}", sha1)
+        r.lpush(f"jobs:{image}", sha1)
 
 
 async def write_enc_file(contents, filepath, session_key):
@@ -63,14 +64,12 @@ async def write_enc_file(contents, filepath, session_key):
 
 
 async def status(request):
-    oid = request.path_params.get('oid', '')
-    oid = oid.encode('utf8')
-    if oid in r.lrange('tobeconfirmed', 0, -1):
-        r.lpush("todo", oid)
-        r.lrem("tobeconfirmed", -1, oid)
-    position = r.lrange("todo", 0, -1).index(oid) + 1
-    queue_size = r.llen("todo")
-    return JSONResponse({'status': 'inqueue', 'position': position, 'queue_size': queue_size})
+    oid = request.path_params.get('oid', '').encode('utf8')
+    if r.exists(f"orders:{oid}"):
+        r.hmset(f"orders:{oid}", "status", "todo")
+        return JSONResponse({'status': 'inqueue'})
+    else:
+        return JSONResponse({'status': 'notfound'})
 
 
 async def file(request):
@@ -102,8 +101,15 @@ async def fetch(request):
         auth_token = request.headers['Authorization'].replace('Bearer ','').encode('utf8')
         assert auth_token in r.smembers("runners"), f"runner {auth_token} not authorized"
         data = await request.json()
-        print(data['images'])
-        return JSONResponse({'status': 'todo'})
+        for i in data.get("images", []):
+            j = r.lpop("jobs:"+i)
+            if j:
+                j = j.decode('utf8')
+                r.hmset(f"inprogress:{i}:{j}", {"time": time.time(),
+                                                  "runner": auth_token})
+                return JSONResponse({"file": j,
+                                     "image": i})
+        return JSONResponse({})
     except Exception as e:
         return await error_handler(e)
 
