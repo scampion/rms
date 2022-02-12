@@ -1,0 +1,30 @@
+<html>
+<head>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 50px;
+        }
+
+        div {
+            margin: 50px;
+        }
+    </style>
+</head>
+<body>
+<h1>Task schechuler</h1>
+<form action="/uploadfiles/" enctype="multipart/form-data" method="post">
+    <div>Select your files : <input name="files" type="file" multiple></div>
+    <div>
+        Select the task :
+        <select name="task" id="task">
+            <option value="sha256:2b92a846f45da0fc8b0d056b14cec0d5aeb94ebf4fa9fa385e569bbd5e167444">keywords</option>
+            <option value="sha256:723d6e338e2299edfc747e0dbd8e9522b0c2b9ccae9553b43c0751a17993c6d8">summarization
+            </option>
+        </select><br>
+    </div>
+    <div>Email : <input type="text" id="email" name="email" required></div>
+    <div><input type="submit"></div>
+</form>
+</body>
+</html>

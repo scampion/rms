@@ -20,22 +20,7 @@ from starlette.routing import Route
 
 
 async def homepage(request):
-    content = """
-    <body>
-    <form action="/uploadfiles/" enctype="multipart/form-data" method="post">
-    Select files : <input name="files" type="file" multiple><br>
-    Select the task : 
-    <select name="task" id="task">
-      <option value="476423317124.dkr.ecr.eu-central-1.amazonaws.com/app/keywords">keywords</option>
-      <option value="476423317124.dkr.ecr.eu-central-1.amazonaws.com/app/summarization">summarization</option>
-    </select><br>
-    Email : <input type="text" id="email" name="email" required><br>
-    <input type="submit">    
-    </form>
-    </body>
-    """
-    return HTMLResponse(content=content)
-
+    return HTMLResponse(content=open("index.html").read())
 
 async def uploadfiles(request):
     try:
@@ -141,9 +126,7 @@ email_domains = []
 config_file = os.environ.get("RMS_CONFIG_FILE", None)
 if config_file:
     logging.info("rms config file configured")
-    print("%" * 80)
     config = json.load(open(config_file))
-    print(config)
     r = redis.Redis.from_url(config['redis_url']) if 'redis_url' in config.keys() else r
     ttl = config.get('ttl', ttl)
     email_domains = config.get('email_domains', email_domains)
