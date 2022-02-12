@@ -9,6 +9,7 @@ import json
 import os.path
 import time
 import uuid
+import logging
 
 import redis
 from Crypto.Cipher import AES
@@ -37,21 +38,23 @@ async def homepage(request):
 
 
 async def uploadfiles(request):
-    session_key = get_random_bytes(16)
-    form = await request.form()
-    assert form['email'].split('@')[1] in email_domains, "You email domain is not allowed"
-    oid = uuid.uuid1()
-    r.hmset(f"orders:{oid}", {"task": form["task"],
-                              "aeskey": base64.b64encode(session_key),
-                              "time": time.time(),
-                              "email": form['email']}
-            )
-    r.expire(f"orders:{oid}", ttl)
-    r.lpush("tobeconfirmed", str(oid))
-    r.publish('tobeconfirmed', str(oid))
-    files = form.getlist("files")
-    await register_files(files, oid, session_key)
-    return JSONResponse({'status': 'registered', 'oid': str(oid)})
+    try:
+        session_key = get_random_bytes(16)
+        form = await request.form()
+        assert form['email'].split('@')[1] in email_domains, f"{form['email']} email domain is not allowed"
+        oid = uuid.uuid1()
+        r.hmset(f"orders:{oid}", {"task": form["task"],
+                                  "aeskey": base64.b64encode(session_key),
+                                  "time": time.time(),
+                                  "email": form['email']})
+        r.expire(f"orders:{oid}", ttl)
+        r.lpush("tobeconfirmed", str(oid))
+        r.publish('tobeconfirmed', str(oid))
+        files = form.getlist("files")
+        await register_files(files, oid, session_key)
+        return JSONResponse({'status': 'registered', 'oid': str(oid)})
+    except Exception as e:
+        return await error_handler(e)
 
 
 async def register_files(files, oid, session_key):
@@ -75,7 +78,7 @@ async def write_enc_file(contents, filepath, session_key):
 
 
 async def status(request):
-    oid = request.path_params.get('oid','')
+    oid = request.path_params.get('oid', '')
     oid = oid.encode('utf8')
     if oid in r.lrange('tobeconfirmed', 0, -1):
         r.lpush("todo", oid)
@@ -90,7 +93,8 @@ async def file(request):
     assert sha1.isalnum(), "Your hash is suspicious"
     filepath = os.path.join(storage, sha1)
     with open(filepath, 'rb') as f:
-        return Response(content=open(filepath,'rb').read(), media_type=str(r.hget(f"file:{sha1}", "content_type")))
+        return Response(content=open(filepath, 'rb').read(), media_type=str(r.hget(f"file:{sha1}", "content_type")))
+
 
 # To be deteled / used for decryption test
 async def get(request):
@@ -106,10 +110,23 @@ async def get(request):
 
 
 async def fetch(request):
-    assert request.client.host.encode('utf8') in r.smembers("ips_allowed"), "ip not authorized"
-    assert request.path_params['token'].encode('utf8') in r.smembers("runners"), "runner not authorized"
-    print(request.path_params['images'])
-    return JSONResponse({'status': 'todo'})
+    try:
+        ip = request.client.host.encode('utf8')
+        assert ip in r.smembers("ips_allowed"), f"ip {ip} not authorized"
+        assert 'Authorization' in request.headers, "Authorization needed"
+        auth_token = request.headers['Authorization'].replace('Bearer ','').encode('utf8')
+        assert auth_token in r.smembers("runners"), f"runner {auth_token} not authorized"
+        data = await request.json()
+        print(data['images'])
+        return JSONResponse({'status': 'todo'})
+    except Exception as e:
+        return await error_handler(e)
+
+
+async def error_handler(e):
+    eid = uuid.uuid1()
+    logging.error(f"{eid} - {e}")
+    return JSONResponse({'error': str(eid)}, status_code=500)
 
 
 ########################################################################################################################
@@ -123,14 +140,18 @@ email_domains = []
 # Overwrite config params if needed
 config_file = os.environ.get("RMS_CONFIG_FILE", None)
 if config_file:
+    logging.info("rms config file configured")
+    print("%" * 80)
     config = json.load(open(config_file))
+    print(config)
     r = redis.Redis.from_url(config['redis_url']) if 'redis_url' in config.keys() else r
     ttl = config.get('ttl', ttl)
     email_domains = config.get('email_domains', email_domains)
+    print(email_domains)
     storage = config.get('storage', storage)
     for runner, params in config.get('runners', {}).items():
         r.sadd("runners", runner)
-        r.hmset("runners:"+runner, params)
+        r.hmset("runners:" + runner, params)
         for k, v in params.items():
             if k == 'ip':
                 r.sadd('ips_allowed', v)
@@ -143,5 +164,5 @@ app = Starlette(debug=True, routes=[
     Route("/status/{oid}", endpoint=status),
     Route("/get/{oid}/{sha1}", endpoint=get),  # to delete
     Route("/file/{sha1}", endpoint=file),  # to delete
-    Route('/fetch/{token}', endpoint=fetch, methods=['GET', 'POST']),
+    Route('/fetch', endpoint=fetch, methods=['GET', 'POST']),
 ])
