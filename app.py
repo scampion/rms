@@ -72,27 +72,6 @@ async def status(request):
         return JSONResponse({'status': 'notfound'})
 
 
-async def file(request):
-    sha1 = request.path_params['sha1']
-    assert sha1.isalnum(), "Your hash is suspicious"
-    filepath = os.path.join(storage, sha1)
-    with open(filepath, 'rb') as f:
-        return Response(content=open(filepath, 'rb').read(), media_type=str(r.hget(f"file:{sha1}", "content_type")))
-
-
-# To be deteled / used for decryption test
-async def get(request):
-    oid = request.path_params['oid']
-    sha1 = request.path_params['sha1']
-    session_key = base64.b64decode(r.hmget(f"params:{oid}", "aeskey")[0])
-    filepath = os.path.join(storage, sha1)
-    with open(filepath, 'rb') as f:
-        nonce, tag, ciphertext = [f.read(x) for x in (16, 16, -1)]
-        cipher_aes = AES.new(session_key, AES.MODE_EAX, nonce)
-        data = cipher_aes.decrypt_and_verify(ciphertext, tag)
-        return Response(content=data, media_type=str(r.hget(f"file:{sha1}", "content_type")))
-
-
 async def fetch(request):
     try:
         ip = request.client.host.encode('utf8')
@@ -102,14 +81,17 @@ async def fetch(request):
         assert auth_token in r.smembers("runners"), f"runner {auth_token} not authorized"
         data = await request.json()
         for i in data.get("images", []):
-            j = r.lpop("jobs:"+i)
-            if j:
-                j = j.decode('utf8')
-                r.hmset(f"inprogress:{i}:{j}", {"time": time.time(),
-                                                  "runner": auth_token})
-                return JSONResponse({"file": j,
-                                     "image": i})
-        return JSONResponse({})
+            sha1 = r.lpop("jobs:"+i)
+            if sha1:
+                sha1 = sha1.decode('utf8')
+                r.hmset(f"inprogress:{i}:{sha1}", {"time": time.time(), "runner": auth_token})
+                media_type = str(r.hget(f"file:{sha1}", "content_type"))
+                filepath = os.path.join(storage, sha1)
+                response = Response(content=open(filepath, 'rb').read(), media_type=media_type)
+                response.headers['X-rms-sha1'] = sha1
+                response.headers['X-rms-image'] = i
+                return response
+        return Response('', status_code=404)
     except Exception as e:
         return await error_handler(e)
 
@@ -151,7 +133,5 @@ app = Starlette(debug=True, routes=[
     Route('/', endpoint=homepage),
     Route('/uploadfiles', endpoint=uploadfiles, methods=['POST']),
     Route("/status/{oid}", endpoint=status),
-    Route("/get/{oid}/{sha1}", endpoint=get),  # to delete
-    Route("/file/{sha1}", endpoint=file),  # to delete
     Route('/fetch', endpoint=fetch, methods=['GET', 'POST']),
 ])
